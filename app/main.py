@@ -7,13 +7,16 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .database import close_connection, get_connection, init_db, write_tx
+from .delivery import start_workers, stop_workers
 from .errors import GraphError, NoGraph, ReportConflict, UnknownService
 from .graph_service import classify_alerts, get_graph, replace_graph
+from .notifications import list_notifications, reconcile_startup
 from .report_service import submit_report
 from .schemas import (
     AlertsResponse,
     GraphPayload,
     GraphResponse,
+    NotificationsResponse,
     ReplaceResponse,
     ReportPayload,
     ReportResponse,
@@ -23,7 +26,15 @@ from .schemas import (
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
-    yield
+    # Existing fault state (e.g. a database created before the outbox feature)
+    # is turned into notifications here; from then on the outbox is written
+    # atomically with every report/graph change.
+    reconcile_startup()
+    stop, threads = start_workers()
+    try:
+        yield
+    finally:
+        stop_workers(stop, threads)
 
 
 app = FastAPI(
@@ -108,11 +119,19 @@ def read_alerts() -> AlertsResponse:
     return AlertsResponse(**classify_alerts())
 
 
+@app.get("/notifications", response_model=NotificationsResponse)
+def read_notifications(status: str | None = None, limit: int = 200) -> NotificationsResponse:
+    """Inspect the notification outbox (delivered, sending and pending rows)."""
+    return NotificationsResponse(**list_notifications(status, limit))
+
+
 @app.post("/admin/reset", status_code=200)
 def admin_reset() -> dict:
     """Clear all data (test/operations helper)."""
     with write_tx() as conn:
         conn.execute("DELETE FROM events")
+        conn.execute("DELETE FROM alert_notifications")
+        conn.execute("DELETE FROM notification_state")
         conn.execute("DELETE FROM service_state")
         conn.execute("DELETE FROM edges")
         conn.execute("DELETE FROM nodes")

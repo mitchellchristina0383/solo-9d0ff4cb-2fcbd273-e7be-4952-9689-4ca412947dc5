@@ -7,8 +7,28 @@ services:
       - "8000:8000"
     environment:
       ALERT_DB_PATH: /data/alerts.db
+      NOTIFY_RECEIVER_URL: http://notify-receiver:9000/alerts
+      NOTIFY_TIMEOUT_SECONDS: "3"
+      NOTIFY_RETRY_BASE_SECONDS: "0.5"
+      NOTIFY_RETRY_CAP_SECONDS: "10"
+      NOTIFY_POLL_SECONDS: "0.25"
+      NOTIFY_WORKERS: "2"
     volumes:
       - alert-data:/data
+    depends_on:
+      notify-receiver:
+        condition: service_healthy
+    restart: unless-stopped
+
+  notify-receiver:
+    build:
+      context: ./receiver
+    image: dependency-alert-receiver:latest
+    container_name: dependency-alert-receiver
+    environment:
+      RECEIVER_API_URL: http://alert-api:8000
+    ports:
+      - "9000:9000"
     restart: unless-stopped
 
 volumes:

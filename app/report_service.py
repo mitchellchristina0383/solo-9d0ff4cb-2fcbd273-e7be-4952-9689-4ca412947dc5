@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from .database import write_tx
 from .errors import ReportConflict, UnknownService
+from .notifications import REASON_REPORT, reconcile_notifications
 from .schemas import ReportPayload
 
 # Report status -> stored state.
@@ -69,6 +70,13 @@ def submit_report(payload: ReportPayload) -> dict:
             "INSERT INTO events (service, seq, status, applied) VALUES (?, ?, ?, ?)",
             (payload.service, payload.seq, wanted, int(applied)),
         )
+
+        # An applied state change may move the service into or out of the
+        # actionable set.  Reconciliation runs in this same transaction: if it
+        # fails, the report is rolled back with it, so there is never a state
+        # change whose notification is silently missing.
+        if applied:
+            reconcile_notifications(conn, trigger=REASON_REPORT)
 
     return {
         "applied": applied,

@@ -6,6 +6,7 @@ from collections import deque
 
 from .database import read_tx, write_tx
 from .errors import GraphError, NoGraph
+from .notifications import REASON_GRAPH, reconcile_notifications
 from .schemas import GraphPayload, GraphResponse, ServiceIn
 
 # ---------------------------------------------------------------------------
@@ -135,6 +136,11 @@ def replace_graph(payload: GraphPayload) -> dict:
                 nodes,
             )
         ]
+
+        # A new graph can change which faulty services are root causes (and can
+        # drop services entirely), so alert membership is recomputed and any
+        # open/close notifications are written in this same transaction.
+        reconcile_notifications(conn, trigger=REASON_GRAPH)
     return {
         "accepted": True,
         "revision": new_revision,
@@ -183,29 +189,41 @@ def get_graph() -> GraphResponse:
     )
 
 
-# ---------------------------------------------------------------------------
-# Fault classification
-# ---------------------------------------------------------------------------
+def load_snapshot(conn: sqlite3.Connection) -> dict:
+    """Read graph + service state from an existing transaction/connection.
 
-
-def classify_alerts() -> dict:
-    """Compute actionable vs suppressed faults from one committed snapshot.
-
-    A faulty service is *suppressed* only when there exists a dependency path
-    on which **every** node is faulty leading to a root cause (a faulty
-    service with no faulty upstream).  Healthy or never-reported nodes cut
-    paths, so a fault behind such a node stays actionable.
+    Used by both ``classify_alerts`` (read transaction) and notification
+    reconciliation (write transaction, so its view is atomic with the change).
     """
-    with read_tx() as conn:
-        revision, version, upstream = _load_graph(conn)
-        down: set[str] = {
-            r["service"]
-            for r in conn.execute("SELECT service FROM service_state WHERE status = 'down'")
-        }
-        seq_rows = {
-            r["service"]: r["last_seq"]
-            for r in conn.execute("SELECT service, last_seq FROM service_state")
-        }
+    revision, version, upstream = _load_graph(conn)
+    down = {
+        r["service"]
+        for r in conn.execute("SELECT service FROM service_state WHERE status = 'down'")
+    }
+    seq_rows = {
+        r["service"]: r["last_seq"]
+        for r in conn.execute("SELECT service, last_seq FROM service_state")
+    }
+    return {
+        "revision": revision,
+        "version": version,
+        "upstream": upstream,
+        "down": down,
+        "seq_rows": seq_rows,
+    }
+
+
+def classify_snapshot(snapshot: dict) -> dict:
+    """Compute alert classification for an already-loaded snapshot.
+
+    Kept separate from SQL access so callers inside a write transaction can
+    reuse the exact same semantics without opening a second transaction.
+    """
+    revision = snapshot["revision"]
+    version = snapshot["version"]
+    upstream: dict[str, list[str]] = snapshot["upstream"]
+    down: set[str] = snapshot["down"]
+    seq_rows: dict[str, int] = snapshot["seq_rows"]
 
     down_here = {s for s in down if s in upstream}
     roots = sorted(s for s in down_here if not any(u in down_here for u in upstream[s]))
@@ -275,3 +293,16 @@ def classify_alerts() -> dict:
         "unreported_services": unreported,
         "healthy_services": healthy,
     }
+
+
+def classify_alerts() -> dict:
+    """Compute actionable vs suppressed faults from one committed snapshot.
+
+    A faulty service is *suppressed* only when there exists a dependency path
+    on which **every** node is faulty leading to a root cause (a faulty
+    service with no faulty upstream).  Healthy or never-reported nodes cut
+    paths, so a fault behind such a node stays actionable.
+    """
+    with read_tx() as conn:
+        snapshot = load_snapshot(conn)
+    return classify_snapshot(snapshot)

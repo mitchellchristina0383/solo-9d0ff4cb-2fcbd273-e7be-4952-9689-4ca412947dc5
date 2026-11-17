@@ -11,6 +11,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY tests ./tests
+# The receiver runs as its own compose service, but copying it means
+# `docker compose exec alert-api python tests/notification_integration.py`
+# can start a throwaway receiver in the API container too.
+COPY receiver ./receiver
 
 RUN mkdir -p /data
 VOLUME ["/data"]

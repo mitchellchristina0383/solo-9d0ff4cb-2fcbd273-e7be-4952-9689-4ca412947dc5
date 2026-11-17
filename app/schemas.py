@@ -83,3 +83,27 @@ class ReplaceResponse(BaseModel):
     service_count: int
     edge_count: int
     preserved_state: list[str]
+
+
+class Notification(BaseModel):
+    id: str
+    service: str
+    action: Literal["open", "close"]
+    service_seq: int
+    round: int
+    reason: str
+    payload: dict
+    status: Literal["pending", "sending", "delivered"]
+    attempts: int
+    next_attempt_at: float
+    last_error: Optional[str]
+    created_at: str
+    delivered_at: Optional[str]
+
+
+class NotificationsResponse(BaseModel):
+    pending: int
+    sending: int
+    delivered: int
+    undelivered_by_service: dict[str, int]
+    notifications: list[Notification]

@@ -59,6 +59,47 @@ CREATE TABLE IF NOT EXISTS events (
     applied         INTEGER NOT NULL,
     recorded_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+-- Per-service notification bookkeeping.  ``is_pending`` mirrors the service's
+-- membership in the *actionable* alert set; ``last_seq`` orders outgoing
+-- notifications for one service; ``round`` is incremented every time the
+-- service re-enters the pending state.
+CREATE TABLE IF NOT EXISTS notification_state (
+    service         TEXT PRIMARY KEY,
+    last_seq        INTEGER NOT NULL DEFAULT 0,
+    round           INTEGER NOT NULL DEFAULT 0,
+    is_pending      INTEGER NOT NULL DEFAULT 0 CHECK (is_pending IN (0, 1)),
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Transactional outbox.  Rows are inserted in the same SQLite transaction as
+-- the report/graph change that caused them.  A row is delivered at most once
+-- (``status='sending'`` is leased) but may be *sent* more than once after a
+-- timeout; the receiver deduplicates by primary-key ``id``.
+CREATE TABLE IF NOT EXISTS alert_notifications (
+    id              TEXT PRIMARY KEY,
+    service         TEXT NOT NULL,
+    action          TEXT NOT NULL CHECK (action IN ('open', 'close')),
+    service_seq     INTEGER NOT NULL,
+    round           INTEGER NOT NULL,
+    reason          TEXT NOT NULL,
+    payload         TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'sending', 'delivered')),
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at REAL NOT NULL DEFAULT 0,
+    lease_owner     TEXT,
+    lease_until     REAL,
+    last_error      TEXT,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    delivered_at    TEXT,
+    UNIQUE (service, service_seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_alert_notifications_due
+    ON alert_notifications (status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_alert_notifications_service
+    ON alert_notifications (service, service_seq);
 """
 
 _local = threading.local()
